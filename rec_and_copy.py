@@ -7,52 +7,52 @@ import os
 import platform
 import subprocess
 import time
+from plyer import notification # Import pour les notifications
 
 # --- CONFIGURATION ---
-HOTKEY = 'ctrl+alt+r' # Le raccourci pour démarrer/arrêter
-SAMPLE_RATE = 44100   # Qualité audio (standard CD)
-CHANNELS = 1          # 1 pour mono, 2 pour stéréo
+HOTKEY = 'ctrl+alt+r' 
+SAMPLE_RATE = 44100
+CHANNELS = 1
 
-# --- Variables globales pour gérer l'enregistrement ---
+# --- Variables globales ---
 is_recording = False
 recorded_frames = []
 
+def send_notification(title, message):
+    """Envoie une notification de bureau simple."""
+    try:
+        notification.notify(
+            title=title,
+            message=message,
+            app_name='Audio Recorder',
+            timeout=5 # La notif disparaît après 5 secondes
+        )
+    except Exception as e:
+        print(f"(!) Pas pu envoyer de notif. Erreur: {e}")
+
 def copy_file_to_clipboard(filepath):
-    """
-    Copie un fichier dans le presse-papiers.
-    La méthode dépend de ton système d'exploitation (OS).
-    """
+    """Copie un fichier dans le presse-papiers (inchangé)."""
     system = platform.system()
     try:
         if system == 'Windows':
-            # Sur Windows, on utilise PowerShell, c'est le plus simple
             command = f'powershell -command "Set-Clipboard -Path \\"{filepath}\\""'
             subprocess.run(command, check=True)
         elif system == 'Darwin': # macOS
-            # Sur macOS, on utilise osascript
             command = f'osascript -e \'set the clipboard to POSIX file "{filepath}"\''
             subprocess.run(command, shell=True, check=True)
         elif system == 'Linux':
-            # Sur Linux, on utilise xclip. Il faut l'installer (sudo apt-get install xclip)
             command = f'xclip -selection clipboard -t text/uri-list -i <<< "file://{filepath}"'
             subprocess.run(command, shell=True, check=True, executable='/bin/bash')
         else:
-            print(f"❌ Système d'exploitation non supporté pour la copie de fichier : {system}")
-            return
-            
-        print(f"✅ Fichier '{os.path.basename(filepath)}' copié dans le presse-papiers !")
-        print("   Tu peux le coller où tu veux (Ctrl+V) !")
-
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        print(f"❌ Oups, erreur en copiant le fichier. Détails : {e}")
-        if system == 'Linux':
-            print("   (Sur Linux, assure-toi d'avoir installé 'xclip' -> sudo apt-get install xclip)")
-
+            print(f"❌ OS non supporté : {system}")
+            return False
+        return True
+    except Exception as e:
+        print(f"❌ Erreur en copiant le fichier. Détails : {e}")
+        return False
 
 def callback(indata, frames, time, status):
-    """Cette fonction est appelée pour chaque bloc audio enregistré."""
-    if status:
-        print(status)
+    """Fonction appelée pour chaque bloc audio."""
     if is_recording:
         recorded_frames.append(indata.copy())
 
@@ -63,46 +63,53 @@ def toggle_recording():
     is_recording = not is_recording
 
     if is_recording:
-        # Début de l'enregistrement
         recorded_frames = []
-        print("🔴 REC ON... Appuie à nouveau sur le raccourci pour arrêter.")
+        print("🔴 REC ON...")
+        send_notification("🔴 Enregistrement démarré", f"Appuie sur {HOTKEY.upper()} pour arrêter.")
     else:
-        # Fin de l'enregistrement
-        print("⚫ REC OFF... Sauvegarde en cours.")
+        print("⚫ REC OFF... Traitement en cours...")
         
         if not recorded_frames:
-            print("🤔 Rien n'a été enregistré. Opération annulée.")
+            print("🤔 Rien n'a été enregistré.")
             return
 
-        # Concatène tous les morceaux enregistrés
+        # 1. Sauvegarder en .wav temporaire
         recording = np.concatenate(recorded_frames, axis=0)
+        temp_wav_path = tempfile.mktemp(suffix='.wav', prefix='rec_')
+        wav.write(temp_wav_path, SAMPLE_RATE, recording)
+        print(f"   Fichier WAV temporaire créé : {os.path.basename(temp_wav_path)}")
 
-        # Crée un fichier temporaire pour sauvegarder l'audio
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav', prefix='vocal_')
-        filepath = temp_file.name
-        temp_file.close() # On le ferme pour que scipy puisse écrire dedans
+        # 2. Convertir le .wav en .m4a avec FFmpeg
+        temp_m4a_path = tempfile.mktemp(suffix='.m4a', prefix='vocal_')
+        try:
+            # -y pour écraser sans demander, -c:a aac pour le codec, -b:a 128k pour la qualité
+            command = f'ffmpeg -i "{temp_wav_path}" -y -c:a aac -b:a 128k "{temp_m4a_path}"'
+            subprocess.run(command, shell=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            print(f"   Fichier M4A final créé : {os.path.basename(temp_m4a_path)}")
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            print("❌ ERREUR: FFmpeg a planté ou n'est pas installé !")
+            print("   Assure-toi que FFmpeg est bien installé et accessible dans ton PATH.")
+            send_notification("❌ Erreur d'enregistrement", "La conversion avec FFmpeg a échoué.")
+            os.remove(temp_wav_path) # Nettoyage
+            return
+        finally:
+            # 3. Supprimer le .wav temporaire qui ne sert plus à rien
+            if os.path.exists(temp_wav_path):
+                os.remove(temp_wav_path)
 
-        # Sauvegarde le fichier WAV
-        wav.write(filepath, SAMPLE_RATE, recording)
-        print(f"🎧 Fichier audio sauvegardé ici : {filepath}")
-        
-        # Copie le fichier dans le presse-papiers
-        copy_file_to_clipboard(filepath)
-
+        # 4. Copier le .m4a dans le presse-papiers
+        if copy_file_to_clipboard(temp_m4a_path):
+            send_notification("✅ Prêt à coller !", f"Ton fichier audio ({os.path.basename(temp_m4a_path)}) est dans le presse-papiers.")
+        else:
+            send_notification("❌ Erreur de copie", "Le fichier a été créé mais n'a pas pu être copié.")
 
 # --- Programme Principal ---
 if __name__ == "__main__":
-    print("🚀 Script prêt ! En attente du raccourci...")
-    print(f"   Appuie sur '{HOTKEY.upper()}' pour démarrer/arrêter l'enregistrement.")
-    print("   Pour quitter le script, fais Ctrl+C dans ce terminal.")
+    print("🚀 Script 2.0 prêt ! En attente du raccourci...")
+    print(f"   Appuie sur '{HOTKEY.upper()}' pour démarrer/arrêter.")
+    print("   Pour quitter, fais Ctrl+C dans ce terminal.")
 
-    # On assigne la fonction au raccourci clavier
-    keyboard.add_hotkey(HOTKEY, toggle_recording, suppress=True)
-
-    # On démarre le flux audio en continu
-    # Il écoute en permanence mais n'enregistre que quand is_recording = True
     with sd.InputStream(samplerate=SAMPLE_RATE, channels=CHANNELS, callback=callback):
-        # Le script va attendre ici que tu l'arrêtes (Ctrl+C)
-        # keyboard.wait() peut parfois causer des soucis, une boucle infinie est plus stable
+        keyboard.add_hotkey(HOTKEY, toggle_recording, suppress=True)
         while True:
             time.sleep(1)
